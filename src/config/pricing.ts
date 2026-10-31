@@ -29,6 +29,10 @@ export const MODEL_PRICING: Record<string, ModelPricing> = {
   },
 
   // Gemini Latest Stable Models
+  'gemini-3.1-flash-lite': {
+    inputMicroUsdPer1M: 100_000,
+    outputMicroUsdPer1M: 400_000,
+  },
   'gemini-3.8-flash': {
     inputMicroUsdPer1M: 150_000,
     outputMicroUsdPer1M: 600_000,
@@ -44,7 +48,7 @@ export const MODEL_PRICING: Record<string, ModelPricing> = {
 };
 
 export const PRIMARY_MODEL = 'qwen/qwen3.8-27b';
-export const FALLBACK_MODEL = 'gemini-3.8-flash';
+export const FALLBACK_MODEL = 'gemini-3.1-flash-lite';
 
 /**
  * Heuristically estimates input tokens:
