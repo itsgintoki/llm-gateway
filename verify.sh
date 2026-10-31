@@ -20,7 +20,7 @@ curl -s -X POST "${GATEWAY_URL}/v1/chat/completions" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer ${RICH_KEY}" \
   -d '{
-    "model": "llama-3.3-70b-versatile",
+    "model": "qwen/qwen3.8-27b",
     "messages": [{"role": "user", "content": "Reply with exactly: Gateway operational."}],
     "max_tokens": 32
   }' | jq '{id, model, content: .choices[0].message.content, usage, x_gateway}'
@@ -33,7 +33,7 @@ curl -s -X POST "${GATEWAY_URL}/v1/chat/completions" \
   -H "Authorization: Bearer ${RICH_KEY}" \
   -H "x-simulate-primary-failure: true" \
   -d '{
-    "model": "llama-3.3-70b-versatile",
+    "model": "qwen/qwen3.8-27b",
     "messages": [{"role": "user", "content": "Reply with exactly: Fallback operational."}],
     "max_tokens": 32
   }' | jq '{id, model, content: .choices[0].message.content, usage, x_gateway}'
@@ -45,7 +45,7 @@ curl -s -i -X POST "${GATEWAY_URL}/v1/chat/completions" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer ${EMPTY_KEY}" \
   -d '{
-    "model": "llama-3.3-70b-versatile",
+    "model": "qwen/qwen3.8-27b",
     "messages": [{"role": "user", "content": "Should be blocked by budget check."}],
     "max_tokens": 32
   }' | head -n 20
