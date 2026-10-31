@@ -32,6 +32,26 @@ app.get('/health', async (_req: Request, res: Response) => {
   }
 });
 
+// Root endpoint - Gateway overview & API documentation
+app.get('/', (_req: Request, res: Response) => {
+  res.status(200).json({
+    service: 'Minimal Production LLM Gateway',
+    version: '1.0.0',
+    status: 'operational',
+    endpoints: {
+      health: 'GET /health',
+      chat_completions: 'POST /v1/chat/completions (Auth: Bearer rok_...)',
+      usage_telemetry: 'GET /v1/usage?key=rok_... or Bearer header',
+    },
+    architecture: {
+      concurrency: 'Two-Phase Pessimistic Reservation (SELECT ... FOR UPDATE)',
+      financial_accounting: 'Integer micro-USD (1 USD = 1,000,000 µUSD)',
+      primary_provider: 'Groq (qwen/qwen3.8-27b)',
+      fallback_provider: 'Google AI Studio (gemini-3.1-flash-lite)',
+    },
+  });
+});
+
 // Mount versioned API routes
 app.use('/v1/chat', chatRouter);
 app.use('/v1/usage', usageRouter);
