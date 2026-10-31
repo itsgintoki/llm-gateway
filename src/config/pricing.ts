@@ -10,7 +10,7 @@ export interface ModelPricing {
  * - gemini-2.5-flash (Gemini Fallback): $0.15 / 1M input (150,000 µUSD), $0.60 / 1M output (600,000 µUSD)
  */
 export const MODEL_PRICING: Record<string, ModelPricing> = {
-  // Groq Latest Stable Models
+  // Groq Modern Stable Models
   'qwen/qwen3.8-27b': {
     inputMicroUsdPer1M: 300_000,
     outputMicroUsdPer1M: 600_000,
@@ -23,23 +23,21 @@ export const MODEL_PRICING: Record<string, ModelPricing> = {
     inputMicroUsdPer1M: 600_000,
     outputMicroUsdPer1M: 1_200_000,
   },
-  'llama-3.3-70b-versatile': {
-    inputMicroUsdPer1M: 590_000,
-    outputMicroUsdPer1M: 790_000,
-  },
 
-  // Gemini Latest Stable Models
-  'gemini-3.1-flash-lite': {
-    inputMicroUsdPer1M: 100_000,
-    outputMicroUsdPer1M: 400_000,
-  },
+  // Gemini Modern Stable Models
   'gemini-3.8-flash': {
     inputMicroUsdPer1M: 150_000,
     outputMicroUsdPer1M: 600_000,
   },
-  'gemini-flash-latest': {
-    inputMicroUsdPer1M: 150_000,
-    outputMicroUsdPer1M: 600_000,
+  'gemini-3.1-flash-lite': {
+    inputMicroUsdPer1M: 100_000,
+    outputMicroUsdPer1M: 400_000,
+  },
+
+  // Template Legacy Aliases
+  'llama-3.3-70b-versatile': {
+    inputMicroUsdPer1M: 590_000,
+    outputMicroUsdPer1M: 790_000,
   },
   'gemini-2.5-flash': {
     inputMicroUsdPer1M: 150_000,
