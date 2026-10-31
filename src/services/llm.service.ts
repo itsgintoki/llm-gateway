@@ -81,14 +81,15 @@ async function callPrimaryProvider(
     );
   }
 
-  // Deterministic mock handling for test suites or when Groq API key is not configured
+  // Deterministic mock handling for test suites or when mock mode is enabled
   const isMockMode =
     env.FALLBACK_MODE === 'mock' ||
     !env.GROQ_API_KEY ||
     env.GROQ_API_KEY === 'mock_groq_key' ||
+    !env.GROQ_API_KEY.startsWith('gsk_') ||
     env.NODE_ENV === 'test';
 
-  if (isMockMode && !env.GROQ_API_KEY.startsWith('gsk_')) {
+  if (isMockMode) {
     // Simulate realistic 50ms provider network latency
     await new Promise((resolve) => setTimeout(resolve, 50));
     const promptTokens = Math.max(10, Math.ceil(JSON.stringify(payload.messages).length / 3));
@@ -191,7 +192,7 @@ async function callFallbackProvider(
     env.FALLBACK_MODE === 'mock' ||
     !env.GEMINI_API_KEY ||
     env.GEMINI_API_KEY === 'mock_gemini_key' ||
-    !env.GEMINI_API_KEY.startsWith('AIza');
+    env.NODE_ENV === 'test';
 
   if (isMockMode) {
     const promptTokens = Math.max(10, Math.ceil(JSON.stringify(payload.messages).length / 3));
