@@ -136,7 +136,7 @@ async function callPrimaryProvider(
         Authorization: `Bearer ${env.GROQ_API_KEY}`,
       },
       body: JSON.stringify({
-        model: PRIMARY_MODEL,
+        model: payload.model || PRIMARY_MODEL,
         messages: payload.messages,
         max_tokens: payload.max_tokens ?? 512,
         temperature: payload.temperature ?? 0.7,
