@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -e
 
-# Replace with your deployed Render/Railway URL before submitting
+# Target gateway URL (defaults to local port 3001)
 GATEWAY_URL="${GATEWAY_URL:-http://localhost:3001}"
 
-# Replace with the deterministic test keys output by `pnpm db:seed`
+# Seeded virtual test keys
 RICH_KEY="${RICH_KEY:-rok_test_rich_1000000_abc123}"
 EMPTY_KEY="${EMPTY_KEY:-rok_test_empty_0000000_ghi789}"
 

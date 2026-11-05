@@ -58,6 +58,49 @@ export class UpstreamProviderError extends Error {
   }
 }
 
+export interface CircuitBreakerState {
+  failures: number;
+  state: 'CLOSED' | 'OPEN' | 'HALF_OPEN';
+  nextAttemptTime: number;
+}
+
+const CIRCUIT_CONFIG = {
+  FAILURE_THRESHOLD: 3, // Trip after 3 consecutive transient failures
+  RESET_TIMEOUT_MS: 30_000, // Cooldown 30s before probing
+};
+
+const circuitBreaker: CircuitBreakerState = {
+  failures: 0,
+  state: 'CLOSED',
+  nextAttemptTime: 0,
+};
+
+export function getCircuitBreakerStatus(): Readonly<CircuitBreakerState> {
+  if (circuitBreaker.state === 'OPEN' && Date.now() >= circuitBreaker.nextAttemptTime) {
+    circuitBreaker.state = 'HALF_OPEN';
+  }
+  return { ...circuitBreaker };
+}
+
+export function resetCircuitBreaker(): void {
+  circuitBreaker.failures = 0;
+  circuitBreaker.state = 'CLOSED';
+  circuitBreaker.nextAttemptTime = 0;
+}
+
+function recordPrimarySuccess(): void {
+  circuitBreaker.failures = 0;
+  circuitBreaker.state = 'CLOSED';
+}
+
+function recordPrimaryFailure(): void {
+  circuitBreaker.failures += 1;
+  if (circuitBreaker.failures >= CIRCUIT_CONFIG.FAILURE_THRESHOLD || circuitBreaker.state === 'HALF_OPEN') {
+    circuitBreaker.state = 'OPEN';
+    circuitBreaker.nextAttemptTime = Date.now() + CIRCUIT_CONFIG.RESET_TIMEOUT_MS;
+  }
+}
+
 /**
  * Checks if an HTTP status code or error is transient and eligible for retry.
  */
@@ -66,11 +109,12 @@ function isTransientError(status: number): boolean {
 }
 
 /**
- * Executes a call to the Primary Provider (Groq) with 8s timeout.
+ * Executes a call to the Primary Provider (Groq) with 8s timeout and client abort support.
  */
 async function callPrimaryProvider(
   payload: ChatCompletionRequest,
-  simulateFailure: boolean
+  simulateFailure: boolean,
+  clientSignal?: AbortSignal
 ): Promise<ProviderChatResponse> {
   if (simulateFailure) {
     throw new UpstreamProviderError(
@@ -90,6 +134,11 @@ async function callPrimaryProvider(
     env.NODE_ENV === 'test';
 
   if (isMockMode) {
+    // Check if client already aborted
+    if (clientSignal?.aborted) {
+      throw new UpstreamProviderError(499, 'client', 'Client closed request before completion', false);
+    }
+
     // Simulate realistic 50ms provider network latency
     await new Promise((resolve) => setTimeout(resolve, 50));
     const promptTokens = Math.max(10, Math.ceil(JSON.stringify(payload.messages).length / 3));
@@ -99,13 +148,13 @@ async function callPrimaryProvider(
       id: `chatcmpl-groq-${Date.now()}`,
       object: 'chat.completion',
       created: Math.floor(Date.now() / 1000),
-      model: PRIMARY_MODEL,
+      model: payload.model || PRIMARY_MODEL,
       choices: [
         {
           index: 0,
           message: {
             role: 'assistant',
-            content: 'Hello! I am Llama 3.3 70B served via Groq.',
+            content: 'Hello! I am Qwen served via Groq.',
           },
           finish_reason: 'stop',
         },
@@ -127,6 +176,9 @@ async function callPrimaryProvider(
   const endpoint = 'https://api.groq.com/openai/v1/chat/completions';
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 8000);
+  const combinedSignal = clientSignal
+    ? AbortSignal.any([controller.signal, clientSignal])
+    : controller.signal;
 
   try {
     const res = await fetch(endpoint, {
@@ -142,7 +194,7 @@ async function callPrimaryProvider(
         temperature: payload.temperature ?? 0.7,
         stream: false,
       }),
-      signal: controller.signal,
+      signal: combinedSignal,
     });
 
     clearTimeout(timeoutId);
@@ -172,6 +224,9 @@ async function callPrimaryProvider(
     if (err instanceof UpstreamProviderError) {
       throw err;
     }
+    if (clientSignal?.aborted) {
+      throw new UpstreamProviderError(499, 'client', 'Client closed request before completion', false);
+    }
     const isTimeout = (err as Error).name === 'AbortError';
     throw new UpstreamProviderError(
       isTimeout ? 504 : 502,
@@ -186,7 +241,8 @@ async function callPrimaryProvider(
  * Executes a call to the Fallback Provider (Gemini OpenAI-compatible endpoint) with 10s timeout.
  */
 async function callFallbackProvider(
-  payload: ChatCompletionRequest
+  payload: ChatCompletionRequest,
+  clientSignal?: AbortSignal
 ): Promise<ProviderChatResponse> {
   const isMockMode =
     env.FALLBACK_MODE === 'mock' ||
@@ -195,6 +251,10 @@ async function callFallbackProvider(
     env.NODE_ENV === 'test';
 
   if (isMockMode) {
+    if (clientSignal?.aborted) {
+      throw new UpstreamProviderError(499, 'client', 'Client closed request before completion', false);
+    }
+
     const promptTokens = Math.max(10, Math.ceil(JSON.stringify(payload.messages).length / 3));
     const completionTokens = Math.min(payload.max_tokens ?? 512, 18);
 
@@ -208,7 +268,7 @@ async function callFallbackProvider(
           index: 0,
           message: {
             role: 'assistant',
-            content: 'Hello! This is a fallback response from Gemini 2.5 Flash.',
+            content: 'Hello! This is a fallback response from Gemini 3.1 Flash Lite.',
           },
           finish_reason: 'stop',
         },
@@ -230,6 +290,9 @@ async function callFallbackProvider(
   const endpoint = 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions';
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 10000);
+  const combinedSignal = clientSignal
+    ? AbortSignal.any([controller.signal, clientSignal])
+    : controller.signal;
 
   try {
     const res = await fetch(endpoint, {
@@ -245,7 +308,7 @@ async function callFallbackProvider(
         temperature: payload.temperature ?? 0.7,
         stream: false,
       }),
-      signal: controller.signal,
+      signal: combinedSignal,
     });
 
     clearTimeout(timeoutId);
@@ -275,6 +338,9 @@ async function callFallbackProvider(
     if (err instanceof UpstreamProviderError) {
       throw err;
     }
+    if (clientSignal?.aborted) {
+      throw new UpstreamProviderError(499, 'client', 'Client closed request before completion', false);
+    }
     const isTimeout = (err as Error).name === 'AbortError';
     throw new UpstreamProviderError(
       isTimeout ? 504 : 502,
@@ -286,16 +352,18 @@ async function callFallbackProvider(
 }
 
 /**
- * Main LLM Orchestrator:
- * 1. Attempt Primary (Groq) with 8s timeout.
- * 2. If transient error (429, 5xx, timeout), wait 250ms and retry Primary once.
+ * Main LLM Orchestrator with Circuit Breaker and Client Abort Propagation:
+ * 1. Check Circuit Breaker for Primary. If OPEN, fast-fail directly to Fallback.
+ * 2. Attempt Primary (Groq) with 8s timeout.
+ * 3. If transient error (429, 5xx, timeout), wait 250ms and retry Primary once.
  *    (Fail immediately on non-transient 400/422).
- * 3. If retry fails, route to Fallback (Gemini) with 10s timeout.
- * 4. Return normalized response with x_gateway metadata.
+ * 4. If retry fails, record failure on Circuit Breaker and route to Fallback (Gemini) with 10s timeout.
+ * 5. Return normalized response with x_gateway metadata.
  */
 export async function executeChatCompletion(
   payload: ChatCompletionRequest,
-  simulatePrimaryFailure: boolean = false
+  simulatePrimaryFailure: boolean = false,
+  clientSignal?: AbortSignal
 ): Promise<{
   response: ProviderChatResponse;
   actualModel: string;
@@ -312,45 +380,77 @@ export async function executeChatCompletion(
   let fallbackReason: string | null = null;
   let response: ProviderChatResponse;
 
-  // Step 1: Attempt Primary Provider
-  try {
-    response = await callPrimaryProvider(payload, simulatePrimaryFailure);
-  } catch (primaryErr: unknown) {
-    const err = primaryErr as UpstreamProviderError;
+  const cbStatus = getCircuitBreakerStatus();
+  const circuitIsOpen = cbStatus.state === 'OPEN' && !simulatePrimaryFailure;
 
-    // Fail immediately on 400 Bad Request / 422 Unprocessable Entity - do NOT retry or fallback
-    if (err.statusCode === 400 || err.statusCode === 422) {
-      throw err;
+  if (circuitIsOpen) {
+    // Fast fail directly to Fallback without waiting for Primary timeout
+    fallbackTriggered = true;
+    fallbackReason = `Primary provider circuit breaker is OPEN (${cbStatus.failures} consecutive failures). Fast-routed directly to fallback.`;
+
+    try {
+      response = await callFallbackProvider(payload, clientSignal);
+    } catch (fallbackErr: unknown) {
+      throw new UpstreamProviderError(
+        502,
+        'gateway',
+        `Primary circuit breaker OPEN and fallback failed: ${(fallbackErr as Error).message}`
+      );
     }
+  } else {
+    // Step 1: Attempt Primary Provider
+    try {
+      response = await callPrimaryProvider(payload, simulatePrimaryFailure, clientSignal);
+      recordPrimarySuccess();
+    } catch (primaryErr: unknown) {
+      const err = primaryErr as UpstreamProviderError;
 
-    // Step 2: Retry Primary once if transient
-    let retrySucceeded = false;
-    if (err.isTransient) {
-      await new Promise((resolve) => setTimeout(resolve, 250));
-      try {
-        response = await callPrimaryProvider(payload, simulateFailureAfterRetry(simulatePrimaryFailure));
-        retrySucceeded = true;
-      } catch (retryErr: unknown) {
-        fallbackReason = (retryErr as Error).message;
+      // Fail immediately on client disconnect (499) or 400 Bad Request / 422 Unprocessable Entity
+      if (err.statusCode === 499 || err.statusCode === 400 || err.statusCode === 422) {
+        throw err;
       }
-    } else {
-      fallbackReason = err.message;
-    }
 
-    // Step 3: Route to Fallback Provider if primary and retry failed
-    if (!retrySucceeded) {
-      fallbackTriggered = true;
-      fallbackReason = fallbackReason || err.message;
+      // Step 2: Retry Primary once if transient
+      let retrySucceeded = false;
+      if (err.isTransient) {
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        try {
+          response = await callPrimaryProvider(
+            payload,
+            simulateFailureAfterRetry(simulatePrimaryFailure),
+            clientSignal
+          );
+          retrySucceeded = true;
+          recordPrimarySuccess();
+        } catch (retryErr: unknown) {
+          if ((retryErr as UpstreamProviderError).statusCode === 499) {
+            throw retryErr;
+          }
+          recordPrimaryFailure();
+          fallbackReason = (retryErr as Error).message;
+        }
+      } else {
+        fallbackReason = err.message;
+      }
 
-      try {
-        response = await callFallbackProvider(payload);
-      } catch (fallbackErr: unknown) {
-        // Both primary and fallback failed -> release reservation and throw 502
-        throw new UpstreamProviderError(
-          502,
-          'gateway',
-          `All LLM providers failed. Primary: ${fallbackReason}. Fallback: ${(fallbackErr as Error).message}`
-        );
+      // Step 3: Route to Fallback Provider if primary and retry failed
+      if (!retrySucceeded) {
+        fallbackTriggered = true;
+        fallbackReason = fallbackReason || err.message;
+
+        try {
+          response = await callFallbackProvider(payload, clientSignal);
+        } catch (fallbackErr: unknown) {
+          if ((fallbackErr as UpstreamProviderError).statusCode === 499) {
+            throw fallbackErr;
+          }
+          // Both primary and fallback failed -> release reservation and throw 502
+          throw new UpstreamProviderError(
+            502,
+            'gateway',
+            `All LLM providers failed. Primary: ${fallbackReason}. Fallback: ${(fallbackErr as Error).message}`
+          );
+        }
       }
     }
   }

@@ -12,9 +12,12 @@ Engineered from first principles with **zero-trust concurrency protection (TOCTO
 * **Zero Transaction Leakage:** Row locks are held exclusively for sub-3ms reservation updates. **Database transactions are NEVER held open while awaiting external LLM HTTP calls.**
 * **Integer Micro-USD Financial Precision:** Eliminates IEEE 754 floating-point rounding drift by storing and computing all monetary amounts in integer micro-USD (`1 USD = 1,000,000 µUSD`) using PostgreSQL `bigint`.
 * **Resilient Provider Proxy & Fallback:**
-  * **Primary Provider:** Groq (`llama-3.3-70b-versatile`) with 8,000ms timeout.
+  * **Primary Provider:** Groq (`qwen/qwen3.8-27b`) with 8,000ms timeout.
   * **Transient Retry:** 1 automatic retry with 250ms backoff on `429`, `5xx`, or timeout. Non-transient `400`/`422` client errors fail fast.
-  * **Fallback Provider:** Gemini (`gemini-2.5-flash`) via OpenAI-compatible endpoint with 10,000ms timeout.
+  * **Fallback Provider:** Gemini (`gemini-3.1-flash-lite`) via OpenAI-compatible endpoint with 10,000ms timeout.
+  * **Circuit Breaker:** Automatically trips to `OPEN` after repeated consecutive primary failures, fast-routing subsequent requests to fallback without paying the 8s timeout penalty.
+* **Orphaned Reservation Sweeper:** Reclaims in-flight reservations stranded if the server suffers an ungraceful crash (`SIGKILL`, OOM) via tracked expiration TTL.
+* **Client Disconnect Propagation:** Immediately aborts upstream LLM calls and refunds reservations if the client closes the connection before completion.
 * **Deterministic Resilience Testing:** Supports `x-simulate-primary-failure: true` header to test provider fallback mechanics on demand.
 * **No Over-Engineering:** Pure Node.js + Express + PostgreSQL stack without Redis dependencies, frontends, or streaming overhead.
 
@@ -91,7 +94,7 @@ pnpm start
 
 ---
 
-## Reviewer Verification via `curl`
+## Quick Verification & Usage via `curl`
 
 Once the server is running on port 3001 (`http://localhost:3001`), run the following commands:
 
@@ -128,7 +131,7 @@ curl -s -X POST http://localhost:3001/v1/chat/completions \
 {
   "id": "chatcmpl-...",
   "object": "chat.completion",
-  "model": "llama-3.3-70b-versatile",
+  "model": "qwen/qwen3.8-27b",
   "choices": [ ... ],
   "usage": { "prompt_tokens": 28, "completion_tokens": 24, "total_tokens": 52 },
   "x_gateway": {
@@ -184,7 +187,7 @@ curl -s -X POST http://localhost:3001/v1/chat/completions \
 ```json
 {
   "id": "chatcmpl-...",
-  "model": "gemini-2.5-flash",
+  "model": "gemini-3.1-flash-lite",
   "choices": [ ... ],
   "x_gateway": {
     "provider_used": "gemini-fallback",
@@ -245,8 +248,7 @@ llm-gateway/
 ├── tests/
 │   └── gateway.test.ts       # Automated integration, fallback, and TOCTOU concurrency tests
 ├── DECISIONS.md              # In-depth architectural tradeoffs, diagrams, and scaling analysis
-├── AI-LOG.md                 # Engineering log of AI assistance and critical human overrides
-├── PLAN.md                   # Phased execution plan and checkpoints
+├── verify.sh                 # End-to-end smoke test & verification script
 ├── drizzle.config.ts         # Drizzle configuration
 ├── package.json
 └── tsconfig.json

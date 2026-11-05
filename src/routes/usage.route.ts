@@ -13,9 +13,13 @@ usageRouter.get('/', async (req: Request, res: Response, next: NextFunction) => 
       rawKey = authHeader.slice(7).trim();
     }
 
-    // 2. Fall back to ?key= query parameter
+    // 2. Fall back to ?key= query parameter (with security advisory header)
     if (!rawKey && typeof req.query.key === 'string') {
       rawKey = req.query.key.trim();
+      res.setHeader(
+        'x-security-advisory',
+        'Passing API keys in query parameters is discouraged; prefer Authorization: Bearer <key>'
+      );
     }
 
     if (!rawKey) {

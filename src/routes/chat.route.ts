@@ -1,10 +1,12 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { z } from 'zod';
+import crypto from 'node:crypto';
 import {
   authenticateAndReserve,
   settleReservation,
   releaseReservation,
   UnauthorizedError,
+  type ReservationResult,
 } from '../services/budget.service.js';
 import {
   estimateWorstCaseReservationMicroUsd,
@@ -37,7 +39,17 @@ const chatRequestSchema = z.object({
 });
 
 chatRouter.post('/completions', async (req: Request, res: Response, next: NextFunction) => {
-  let reservation: { keyId: string; reservedMicroUsd: number } | null = null;
+  let reservation: ReservationResult | null = null;
+  const requestId = (req.headers['x-request-id'] as string) || `req_${crypto.randomUUID()}`;
+  res.setHeader('x-request-id', requestId);
+
+  // Link premature client connection drop to abort signal
+  const clientAbortController = new AbortController();
+  res.on('close', () => {
+    if (!res.writableEnded) {
+      clientAbortController.abort();
+    }
+  });
 
   try {
     // 1. Extract Bearer token
@@ -64,8 +76,8 @@ chatRouter.post('/completions', async (req: Request, res: Response, next: NextFu
 
     const { messages, max_tokens, temperature, model } = parsedBody.data;
 
-    // 3. Pre-flight worst-case estimation
-    const worstCaseMicroUsd = estimateWorstCaseReservationMicroUsd(messages, max_tokens);
+    // 3. Pre-flight model-aware worst-case estimation
+    const worstCaseMicroUsd = estimateWorstCaseReservationMicroUsd(messages, max_tokens, model);
 
     // 4. Phase 1: Two-Phase Commit - Authenticate & Pessimistic Reservation
     reservation = await authenticateAndReserve(rawKey, worstCaseMicroUsd);
@@ -86,12 +98,17 @@ chatRouter.post('/completions', async (req: Request, res: Response, next: NextFu
           temperature,
           stream: false,
         },
-        simulateFailure
+        simulateFailure,
+        clientAbortController.signal
       );
     } catch (llmErr) {
-      // LLM failed - release in-flight reservation immediately
+      // LLM failed or client disconnected - release in-flight reservation immediately
       if (reservation) {
-        await releaseReservation(reservation.keyId, reservation.reservedMicroUsd);
+        await releaseReservation(
+          reservation.keyId,
+          reservation.reservedMicroUsd,
+          reservation.reservationId
+        );
         reservation = null;
       }
       throw llmErr;
@@ -103,6 +120,7 @@ chatRouter.post('/completions', async (req: Request, res: Response, next: NextFu
       reservation.reservedMicroUsd,
       executionResult.costMicroUsd,
       {
+        requestId,
         requestedModel: model,
         actualModel: executionResult.actualModel,
         providerUsed: executionResult.providerUsed,
@@ -113,7 +131,8 @@ chatRouter.post('/completions', async (req: Request, res: Response, next: NextFu
         costMicroUsd: executionResult.costMicroUsd,
         latencyMs: executionResult.latencyMs,
         statusCode: 200,
-      }
+      },
+      reservation.reservationId
     );
 
     // Mark reservation settled
@@ -124,7 +143,11 @@ chatRouter.post('/completions', async (req: Request, res: Response, next: NextFu
   } catch (err) {
     if (reservation) {
       try {
-        await releaseReservation(reservation.keyId, reservation.reservedMicroUsd);
+        await releaseReservation(
+          reservation.keyId,
+          reservation.reservedMicroUsd,
+          reservation.reservationId
+        );
       } catch (rollbackErr) {
         console.error('CRITICAL: Failed to release reservation on error:', rollbackErr);
       }

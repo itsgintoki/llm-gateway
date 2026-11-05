@@ -1,5 +1,11 @@
 import { db } from '../db/index.js';
-import { virtualKeys, usageLogs, type NewUsageLog, type VirtualKey } from '../db/schema.js';
+import {
+  virtualKeys,
+  usageLogs,
+  inFlightReservations,
+  type NewUsageLog,
+  type VirtualKey,
+} from '../db/schema.js';
 import { hashKey } from '../utils/crypto.js';
 import { eq, sql } from 'drizzle-orm';
 
@@ -45,6 +51,7 @@ export class BudgetExceededError extends GatewayError {
 }
 
 export interface ReservationResult {
+  reservationId: string;
   keyId: string;
   keyName: string;
   keyPrefix: string;
@@ -54,12 +61,14 @@ export interface ReservationResult {
 /**
  * Phase 1 of Two-Phase Commit: Authenticate key & Pessimistically Reserve budget.
  * Holds a short-lived row-level lock (SELECT ... FOR UPDATE) to eliminate race conditions (TOCTOU).
+ * Records an in-flight reservation with an expiration TTL for automated crash recovery.
  * The transaction commits IMMEDIATELY after updating reserved_micro_usd.
  * NEVER holds the transaction while making external LLM calls.
  */
 export async function authenticateAndReserve(
   rawKey: string,
-  estimatedCostMicroUsd: number
+  estimatedCostMicroUsd: number,
+  ttlSeconds: number = 60
 ): Promise<ReservationResult> {
   const keyHash = hashKey(rawKey);
 
@@ -98,7 +107,19 @@ export async function authenticateAndReserve(
       })
       .where(eq(virtualKeys.id, key.id));
 
+    // Record in-flight reservation with TTL for crash safety
+    const expiresAt = new Date(Date.now() + ttlSeconds * 1000);
+    const [reservationRow] = await tx
+      .insert(inFlightReservations)
+      .values({
+        keyId: key.id,
+        amountMicroUsd: estimatedCostMicroUsd,
+        expiresAt,
+      })
+      .returning({ id: inFlightReservations.id });
+
     return {
+      reservationId: reservationRow.id,
       keyId: key.id,
       keyName: key.name,
       keyPrefix: key.keyPrefix,
@@ -109,14 +130,15 @@ export async function authenticateAndReserve(
 
 /**
  * Phase 2 of Two-Phase Commit: Settle Reservation.
- * Deducts in-flight reservation, increments settled spend with actual cost,
- * and writes the usage log in a single ACID transaction.
+ * Deducts in-flight reservation, deletes in-flight tracking row, increments settled spend
+ * with actual cost, and writes the usage log in a single ACID transaction.
  */
 export async function settleReservation(
   keyId: string,
   reservedMicroUsd: number,
   actualCostMicroUsd: number,
-  logEntry: Omit<NewUsageLog, 'id' | 'keyId' | 'createdAt'>
+  logEntry: Omit<NewUsageLog, 'id' | 'keyId' | 'createdAt'>,
+  reservationId?: string
 ): Promise<void> {
   await db.transaction(async (tx) => {
     await tx
@@ -127,6 +149,12 @@ export async function settleReservation(
       })
       .where(eq(virtualKeys.id, keyId));
 
+    if (reservationId) {
+      await tx
+        .delete(inFlightReservations)
+        .where(eq(inFlightReservations.id, reservationId));
+    }
+
     await tx.insert(usageLogs).values({
       keyId,
       ...logEntry,
@@ -135,23 +163,71 @@ export async function settleReservation(
 }
 
 /**
- * Phase 2 Rollback: Release Reservation on Unrecoverable Error.
- * Decrements the in-flight reservation back to 0 without billing the user.
+ * Phase 2 Rollback: Release Reservation on Unrecoverable Error or Client Disconnect.
+ * Decrements the in-flight reservation back to 0 and clears tracking row without billing the user.
  */
 export async function releaseReservation(
   keyId: string,
-  reservedMicroUsd: number
+  reservedMicroUsd: number,
+  reservationId?: string
 ): Promise<void> {
-  await db
-    .update(virtualKeys)
-    .set({
-      reservedMicroUsd: sql`GREATEST(0, ${virtualKeys.reservedMicroUsd} - ${reservedMicroUsd})`,
-    })
-    .where(eq(virtualKeys.id, keyId));
+  await db.transaction(async (tx) => {
+    await tx
+      .update(virtualKeys)
+      .set({
+        reservedMicroUsd: sql`GREATEST(0, ${virtualKeys.reservedMicroUsd} - ${reservedMicroUsd})`,
+      })
+      .where(eq(virtualKeys.id, keyId));
+
+    if (reservationId) {
+      await tx
+        .delete(inFlightReservations)
+        .where(eq(inFlightReservations.id, reservationId));
+    }
+  });
 }
 
 /**
- * Helper to fetch usage statistics for a key.
+ * Sweeps and reclaims orphaned/stale reservations that expired (e.g. from an ungraceful server crash).
+ * Restores locked reserved_micro_usd balances on virtual keys.
+ */
+export async function reclaimStaleReservations(): Promise<{ reclaimedCount: number; restoredMicroUsd: number }> {
+  const now = new Date();
+
+  return await db.transaction(async (tx) => {
+    const expired = await tx
+      .select()
+      .from(inFlightReservations)
+      .where(sql`${inFlightReservations.expiresAt} <= ${now}`)
+      .for('update');
+
+    if (expired.length === 0) {
+      return { reclaimedCount: 0, restoredMicroUsd: 0 };
+    }
+
+    let restoredMicroUsd = 0;
+    for (const res of expired) {
+      await tx
+        .update(virtualKeys)
+        .set({
+          reservedMicroUsd: sql`GREATEST(0, ${virtualKeys.reservedMicroUsd} - ${res.amountMicroUsd})`,
+        })
+        .where(eq(virtualKeys.id, res.keyId));
+      restoredMicroUsd += res.amountMicroUsd;
+    }
+
+    const expiredIds = expired.map((e) => e.id);
+    await tx
+      .delete(inFlightReservations)
+      .where(sql`${inFlightReservations.id} IN ${expiredIds}`);
+
+    return { reclaimedCount: expired.length, restoredMicroUsd };
+  });
+}
+
+/**
+ * Helper to fetch accurate usage statistics for a key.
+ * Queries SQL aggregation for true total count and fallback count across all history.
  */
 export async function getKeyUsage(rawKeyOrHash: string, isRaw: boolean = true) {
   const keyHash = isRaw ? hashKey(rawKeyOrHash) : rawKeyOrHash;
@@ -166,6 +242,16 @@ export async function getKeyUsage(rawKeyOrHash: string, isRaw: boolean = true) {
     throw new UnauthorizedError();
   }
 
+  // True SQL aggregates across entire history
+  const [aggregates] = await db
+    .select({
+      totalRequests: sql<number>`count(*)::int`,
+      fallbackCount: sql<number>`count(*) filter (where ${usageLogs.fallbackTriggered} = true)::int`,
+    })
+    .from(usageLogs)
+    .where(eq(usageLogs.keyId, key.id));
+
+  // Recent 20 logs for audit inspection
   const logs = await db
     .select()
     .from(usageLogs)
@@ -179,8 +265,8 @@ export async function getKeyUsage(rawKeyOrHash: string, isRaw: boolean = true) {
   const remainingMicroUsd = Math.max(0, budgetLimitMicroUsd - spentMicroUsd - reservedMicroUsd);
   const spendUsdFormatted = `$${(spentMicroUsd / 1_000_000).toFixed(6)}`;
 
-  const totalRequests = logs.length;
-  const fallbackCount = logs.filter((l) => l.fallbackTriggered).length;
+  const totalRequests = Number(aggregates?.totalRequests ?? 0);
+  const fallbackCount = Number(aggregates?.fallbackCount ?? 0);
 
   return {
     key_name: key.name,

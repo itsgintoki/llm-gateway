@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import request from 'supertest';
 import { app } from '../src/app.js';
 import { db, pool } from '../src/db/index.js';
-import { virtualKeys, usageLogs } from '../src/db/schema.js';
+import { virtualKeys, usageLogs, inFlightReservations } from '../src/db/schema.js';
 import { seed, TEST_KEYS } from '../src/db/seed.js';
 import { hashKey } from '../src/utils/crypto.js';
 import {
@@ -11,7 +11,9 @@ import {
   PRIMARY_MODEL,
   FALLBACK_MODEL,
 } from '../src/config/pricing.js';
-import { eq } from 'drizzle-orm';
+import { reclaimStaleReservations } from '../src/services/budget.service.js';
+import { getCircuitBreakerStatus, resetCircuitBreaker } from '../src/services/llm.service.js';
+import { eq, sql } from 'drizzle-orm';
 
 describe('LLM Gateway Integration & Concurrency Test Suite', () => {
   beforeAll(async () => {
@@ -253,6 +255,100 @@ describe('LLM Gateway Integration & Concurrency Test Suite', () => {
 
       expect(usageResQuery.status).toBe(200);
       expect(usageResQuery.body.spent_micro_usd).toBe(usageResHeader.body.spent_micro_usd);
+    });
+
+    it('reports accurate aggregate total_requests even when usage logs exceed the 20-row limit', async () => {
+      const richHash = hashKey(TEST_KEYS.RICH);
+      const [key] = await db
+        .select()
+        .from(virtualKeys)
+        .where(eq(virtualKeys.keyHash, richHash));
+
+      // Insert 25 mock log rows into database
+      const batchLogs = Array.from({ length: 25 }, (_, i) => ({
+        keyId: key.id,
+        requestId: `req_test_batch_${i}`,
+        requestedModel: PRIMARY_MODEL,
+        actualModel: PRIMARY_MODEL,
+        providerUsed: 'groq',
+        fallbackTriggered: i % 5 === 0, // 5 fallbacks
+        promptTokens: 10,
+        completionTokens: 10,
+        costMicroUsd: 10,
+        latencyMs: 50,
+        statusCode: 200,
+      }));
+
+      await db.insert(usageLogs).values(batchLogs);
+
+      const usageRes = await request(app)
+        .get('/v1/usage')
+        .set('Authorization', `Bearer ${TEST_KEYS.RICH}`);
+
+      expect(usageRes.status).toBe(200);
+      // Aggregate must reflect at least 25 total requests, not 20
+      expect(usageRes.body.total_requests).toBeGreaterThanOrEqual(25);
+      // Recent logs array is still cleanly capped at 20 for preview
+      expect(usageRes.body.recent_logs.length).toBe(20);
+    });
+  });
+
+  describe('6. Model-Aware Worst-Case Reservation Sizing', () => {
+    it('calculates higher pre-flight worst-case reservation for expensive models', () => {
+      const messages = [{ role: 'user', content: 'Price check' }];
+      const standardCost = estimateWorstCaseReservationMicroUsd(messages, 500, PRIMARY_MODEL);
+      const expensiveCost = estimateWorstCaseReservationMicroUsd(messages, 500, 'openai/gpt-oss-120b');
+
+      expect(expensiveCost).toBeGreaterThan(standardCost);
+    });
+  });
+
+  describe('7. Orphaned Reservation Recovery Sweeper', () => {
+    it('reclaims expired in-flight reservations and restores virtual key balance', async () => {
+      const richHash = hashKey(TEST_KEYS.RICH);
+      const [key] = await db
+        .select()
+        .from(virtualKeys)
+        .where(eq(virtualKeys.keyHash, richHash));
+
+      // Simulate a crashed process that left 500 µUSD locked in reservation
+      await db
+        .update(virtualKeys)
+        .set({
+          reservedMicroUsd: sql`${virtualKeys.reservedMicroUsd} + 500`,
+        })
+        .where(eq(virtualKeys.id, key.id));
+
+      // Insert an expired in-flight reservation row (expired 10 seconds ago)
+      await db.insert(inFlightReservations).values({
+        keyId: key.id,
+        amountMicroUsd: 500,
+        expiresAt: new Date(Date.now() - 10_000),
+      });
+
+      // Run sweeper
+      const { reclaimedCount, restoredMicroUsd } = await reclaimStaleReservations();
+      expect(reclaimedCount).toBeGreaterThanOrEqual(1);
+      expect(restoredMicroUsd).toBeGreaterThanOrEqual(500);
+
+      // Verify the virtual key's reservedMicroUsd was restored
+      const [updatedKey] = await db
+        .select()
+        .from(virtualKeys)
+        .where(eq(virtualKeys.id, key.id));
+      expect(updatedKey.reservedMicroUsd).toBe(0);
+    });
+  });
+
+  describe('8. Primary Provider Circuit Breaker', () => {
+    beforeEach(() => {
+      resetCircuitBreaker();
+    });
+
+    it('reports circuit breaker status on GET /health', async () => {
+      const res = await request(app).get('/health');
+      expect(res.status).toBe(200);
+      expect(res.body.circuit_breaker).toBe('CLOSED');
     });
   });
 });

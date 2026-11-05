@@ -59,25 +59,26 @@ export function estimateInputTokens(messages: unknown): number {
 
 /**
  * Computes worst-case cost reservation in integer micro-USD.
- * Uses the highest price between primary and fallback providers to ensure
- * zero-risk solvency regardless of whether fallback triggers.
+ * Uses the highest price between the requested model and the fallback provider to ensure
+ * zero-risk solvency regardless of whether fallback triggers or an expensive model is requested.
  */
 export function estimateWorstCaseReservationMicroUsd(
   messages: unknown,
-  maxTokens: number = 512
+  maxTokens: number = 512,
+  requestedModel: string = PRIMARY_MODEL
 ): number {
   const estimatedInput = estimateInputTokens(messages);
   const cappedMaxTokens = Math.min(Math.max(1, maxTokens), 4096);
 
-  const primaryPricing = MODEL_PRICING[PRIMARY_MODEL]!;
+  const targetPricing = MODEL_PRICING[requestedModel] || MODEL_PRICING[PRIMARY_MODEL]!;
   const fallbackPricing = MODEL_PRICING[FALLBACK_MODEL]!;
 
   const higherInputRate = Math.max(
-    primaryPricing.inputMicroUsdPer1M,
+    targetPricing.inputMicroUsdPer1M,
     fallbackPricing.inputMicroUsdPer1M
   );
   const higherOutputRate = Math.max(
-    primaryPricing.outputMicroUsdPer1M,
+    targetPricing.outputMicroUsdPer1M,
     fallbackPricing.outputMicroUsdPer1M
   );
 

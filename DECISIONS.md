@@ -112,10 +112,31 @@ In a naive `SELECT spent -> call LLM -> UPDATE spent` architecture, both request
 
 ---
 
-## 9. Where It Breaks & What We'd Do With One More Week
+## 9. Production Hardening Implemented
 
-1. **Orphaned Reservations on Hard Crash (`SIGKILL`):** If the Node.js process is `kill -9`'d mid-flight while waiting for Groq, the `reserved_micro_usd` for that in-flight request remains permanently locked in Postgres.
-* *Week 2 Fix:* Create an `in_flight_reservations` table with an `expires_at` timestamp (now + 30s) and a periodic sweeper cron (or lazy cleanup on read) that reclaims stale reservations.
+1. **Orphaned Reservation Crash Recovery Sweeper:**
+   * **Problem Solved:** If the Node.js process is terminated mid-flight (`SIGKILL`, OOM, container restart), in-flight `reserved_micro_usd` would historically stay locked indefinitely.
+   * **Implementation:** Built an `in_flight_reservations` PostgreSQL table tracking `key_id`, `amount_micro_usd`, and an `expires_at` timestamp with a 60-second TTL. The server runs a non-blocking `reclaimStaleReservations()` sweeper at boot and periodically every 30 seconds to automatically release stranded reservations.
 
-2. **Row-Level Lock Contention on Hot Keys (>500 RPS per single key):** Because `SELECT ... FOR UPDATE` serializes reservations per virtual key in Postgres, a single high-throughput tenant key firing thousands of concurrent requests per second will experience Postgres lock-wait queuing.
-* *Week 2 Fix:* Move the hot reservation atomic counter into a **Redis Lua script** (`EVAL` checking `spent + reserved + estimate <= limit`) and flush settled usage logs asynchronously in batches to Postgres via BullMQ.
+2. **Primary Provider Circuit Breaker:**
+   * **Problem Solved:** An extended outage at Groq would subject every request to an 8s timeout + 250ms retry before falling back to Gemini (~8.5s latency penalty).
+   * **Implementation:** Built an automated state machine (`CLOSED` -> `OPEN` -> `HALF_OPEN`). After 3 consecutive transient failures, the circuit trips to `OPEN` for 30 seconds, immediately short-circuiting calls directly to Gemini fallback with zero added latency.
+
+3. **Model-Aware Pre-Flight Solvency Verification:**
+   * **Problem Solved:** When a client requested a frontier or expensive model (e.g., `openai/gpt-oss-120b`), reservations previously priced against `PRIMARY_MODEL` would under-reserve and risk budget overdraft.
+   * **Implementation:** `estimateWorstCaseReservationMicroUsd` dynamically prices reservations using `Math.max(targetPricing, fallbackPricing)`.
+
+4. **Client Connection Drop Propagation:**
+   * **Problem Solved:** If an HTTP client canceled or disconnected mid-request, the gateway would continue waiting for the upstream LLM and bill the user.
+   * **Implementation:** Linked HTTP `res.on('close')` to an `AbortController` passed into native `fetch` via `AbortSignal.any()`. If the client closes connection prematurely, the upstream call is aborted immediately and reservations are refunded.
+
+5. **Composite Database Indexing & True SQL Aggregation:**
+   * Added `index('usage_logs_key_id_created_at_idx')` to eliminate sequential table scans.
+   * Upgraded `getKeyUsage()` to query PostgreSQL aggregate counts (`count(*)` and `count(*) filter (...)`) so lifetime usage statistics are never capped by the recent-logs preview window.
+
+---
+
+## 10. Future Scale Horizon (High-Throughput Tier)
+
+1. **Row-Level Lock Contention on Hot Keys (>500 RPS per single key):** Because `SELECT ... FOR UPDATE` serializes reservations per virtual key in Postgres, a single high-throughput tenant key firing thousands of concurrent requests per second will experience Postgres lock-wait queuing.
+* *Scale Horizon Fix:* Move the hot reservation atomic counter into a **Redis Lua script** (`EVAL` checking `spent + reserved + estimate <= limit`) and flush settled usage logs asynchronously in batches to Postgres via BullMQ.

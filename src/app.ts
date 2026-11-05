@@ -6,7 +6,7 @@ import { pool } from './db/index.js';
 import { chatRouter } from './routes/chat.route.js';
 import { usageRouter } from './routes/usage.route.js';
 import { GatewayError } from './services/budget.service.js';
-import { UpstreamProviderError } from './services/llm.service.js';
+import { UpstreamProviderError, getCircuitBreakerStatus } from './services/llm.service.js';
 
 export const app = express();
 
@@ -19,8 +19,10 @@ app.use(express.json({ limit: '2mb' }));
 app.get('/health', async (_req: Request, res: Response) => {
   try {
     await pool.query('SELECT 1');
+    const cbStatus = getCircuitBreakerStatus();
     return res.status(200).json({
       status: 'ok',
+      circuit_breaker: cbStatus.state,
       timestamp: new Date().toISOString(),
     });
   } catch (err) {
