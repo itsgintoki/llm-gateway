@@ -134,7 +134,6 @@ async function callPrimaryProvider(
     env.NODE_ENV === 'test';
 
   if (isMockMode) {
-    // Check if client already aborted
     if (clientSignal?.aborted) {
       throw new UpstreamProviderError(499, 'client', 'Client closed request before completion', false);
     }
@@ -398,7 +397,6 @@ export async function executeChatCompletion(
       );
     }
   } else {
-    // Step 1: Attempt Primary Provider
     try {
       response = await callPrimaryProvider(payload, simulatePrimaryFailure, clientSignal);
       recordPrimarySuccess();
@@ -410,7 +408,6 @@ export async function executeChatCompletion(
         throw err;
       }
 
-      // Step 2: Retry Primary once if transient
       let retrySucceeded = false;
       if (err.isTransient) {
         await new Promise((resolve) => setTimeout(resolve, 250));
@@ -433,7 +430,6 @@ export async function executeChatCompletion(
         fallbackReason = err.message;
       }
 
-      // Step 3: Route to Fallback Provider if primary and retry failed
       if (!retrySucceeded) {
         fallbackTriggered = true;
         fallbackReason = fallbackReason || err.message;

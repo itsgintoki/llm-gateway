@@ -7,12 +7,15 @@ import { chatRouter } from './routes/chat.route.js';
 import { usageRouter } from './routes/usage.route.js';
 import { GatewayError } from './services/budget.service.js';
 import { UpstreamProviderError, getCircuitBreakerStatus } from './services/llm.service.js';
+import { env } from './config/env.js';
 
 export const app = express();
 
+const allowedOrigins = env.CORS_ORIGINS.split(',').map((origin) => origin.trim()).filter(Boolean);
+
 // Security and middleware
 app.use(helmet());
-app.use(cors());
+app.use(cors({ origin: allowedOrigins.length > 0 ? allowedOrigins : false }));
 app.use(express.json({ limit: '2mb' }));
 
 // Health check endpoint

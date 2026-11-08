@@ -140,7 +140,10 @@ DATABASE_URL=postgresql://postgres:postgres@localhost:5432/llm_gateway
 GROQ_API_KEY=gsk_your_groq_api_key_here
 GEMINI_API_KEY=AIzaSy_your_gemini_api_key_here
 FALLBACK_MODE=live
+CORS_ORIGINS=http://localhost:3000
 ```
+
+> **CORS:** `CORS_ORIGINS` is a comma-separated allowlist of browser origins. Leave it empty to reject all cross-origin browser requests; server-to-server callers using a Bearer virtual key are unaffected.
 
 > **Note on Testing & Mock Mode:** If you do not have live Groq/Gemini API keys, set `FALLBACK_MODE=mock`. The test suite and server will use high-fidelity, deterministic simulated responses with 50ms simulated network latency.
 
