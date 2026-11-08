@@ -248,8 +248,8 @@ llm-gateway/
 ├── tests/
 │   └── gateway.test.ts       # Automated integration, fallback, and TOCTOU concurrency tests
 ├── DECISIONS.md              # In-depth architectural tradeoffs, diagrams, and scaling analysis
-├── verify.sh                 # End-to-end smoke test & verification script
 ├── drizzle.config.ts         # Drizzle configuration
 ├── package.json
-└── tsconfig.json
+├── tsconfig.json             # Typecheck (src + tests)
+└── tsconfig.build.json       # Production build (src only)
 ```

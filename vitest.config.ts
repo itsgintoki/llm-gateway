@@ -6,5 +6,9 @@ export default defineConfig({
     exclude: ['dist/**', 'node_modules/**'],
     fileParallelism: false,
     testTimeout: 15000,
+    env: {
+      NODE_ENV: 'test',
+      FALLBACK_MODE: 'mock',
+    },
   },
 });

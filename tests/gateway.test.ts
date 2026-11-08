@@ -7,12 +7,10 @@ import { seed, TEST_KEYS } from '../src/db/seed.js';
 import { hashKey } from '../src/utils/crypto.js';
 import {
   estimateWorstCaseReservationMicroUsd,
-  calculateActualCostMicroUsd,
   PRIMARY_MODEL,
-  FALLBACK_MODEL,
 } from '../src/config/pricing.js';
 import { reclaimStaleReservations } from '../src/services/budget.service.js';
-import { getCircuitBreakerStatus, resetCircuitBreaker } from '../src/services/llm.service.js';
+import { resetCircuitBreaker } from '../src/services/llm.service.js';
 import { eq, sql } from 'drizzle-orm';
 
 describe('LLM Gateway Integration & Concurrency Test Suite', () => {
@@ -25,53 +23,34 @@ describe('LLM Gateway Integration & Concurrency Test Suite', () => {
   });
 
   beforeEach(async () => {
-    // Reset seed data before each test for clean deterministic state
+    // Reset seed data and circuit state before each test for clean deterministic state
+    resetCircuitBreaker();
     await seed();
   });
 
   describe('Health Endpoint', () => {
-    it('returns 200 and healthy DB status on GET /health', async () => {
+    it('returns 200, a healthy DB status, and a closed circuit breaker', async () => {
       const res = await request(app).get('/health');
       expect(res.status).toBe(200);
       expect(res.body.status).toBe('ok');
       expect(res.body.timestamp).toBeDefined();
+      expect(res.body.circuit_breaker).toBe('CLOSED');
     });
   });
 
   describe('1. Authentication Verification', () => {
-    it('rejects requests with missing Authorization header (401)', async () => {
-      const res = await request(app)
-        .post('/v1/chat/completions')
-        .send({
-          messages: [{ role: 'user', content: 'Hello' }],
-        });
+    it('rejects missing, malformed, and unknown Authorization headers (401)', async () => {
+      const send = (authorization?: string) => {
+        const req = request(app).post('/v1/chat/completions');
+        if (authorization !== undefined) req.set('Authorization', authorization);
+        return req.send({ messages: [{ role: 'user', content: 'Hello' }] });
+      };
 
-      expect(res.status).toBe(401);
-      expect(res.body.error.code).toBe('unauthorized');
-    });
-
-    it('rejects requests with malformed Authorization header (401)', async () => {
-      const res = await request(app)
-        .post('/v1/chat/completions')
-        .set('Authorization', 'Basic 123456')
-        .send({
-          messages: [{ role: 'user', content: 'Hello' }],
-        });
-
-      expect(res.status).toBe(401);
-      expect(res.body.error.code).toBe('unauthorized');
-    });
-
-    it('rejects requests with unknown virtual key (401)', async () => {
-      const res = await request(app)
-        .post('/v1/chat/completions')
-        .set('Authorization', 'Bearer rok_invalid_key_99999999')
-        .send({
-          messages: [{ role: 'user', content: 'Hello' }],
-        });
-
-      expect(res.status).toBe(401);
-      expect(res.body.error.code).toBe('unauthorized');
+      for (const authorization of [undefined, 'Basic 123456', 'Bearer rok_invalid_key_99999999']) {
+        const res = await send(authorization);
+        expect(res.status).toBe(401);
+        expect(res.body.error.code).toBe('unauthorized');
+      }
     });
   });
 
@@ -154,7 +133,6 @@ describe('LLM Gateway Integration & Concurrency Test Suite', () => {
       // Dispatch 3 simultaneous requests concurrently via Promise.all
       const responses = await Promise.all([sendRequest(), sendRequest(), sendRequest()]);
 
-      const statusCodes = responses.map((r) => r.status);
       const successResponses = responses.filter((r) => r.status === 200);
       const rejectedResponses = responses.filter((r) => r.status === 402);
 
@@ -337,18 +315,6 @@ describe('LLM Gateway Integration & Concurrency Test Suite', () => {
         .from(virtualKeys)
         .where(eq(virtualKeys.id, key.id));
       expect(updatedKey.reservedMicroUsd).toBe(0);
-    });
-  });
-
-  describe('8. Primary Provider Circuit Breaker', () => {
-    beforeEach(() => {
-      resetCircuitBreaker();
-    });
-
-    it('reports circuit breaker status on GET /health', async () => {
-      const res = await request(app).get('/health');
-      expect(res.status).toBe(200);
-      expect(res.body.circuit_breaker).toBe('CLOSED');
     });
   });
 });

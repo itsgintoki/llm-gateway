@@ -4,7 +4,6 @@ import {
   usageLogs,
   inFlightReservations,
   type NewUsageLog,
-  type VirtualKey,
 } from '../db/schema.js';
 import { hashKey } from '../utils/crypto.js';
 import { eq, sql } from 'drizzle-orm';

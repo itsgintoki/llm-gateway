@@ -6,13 +6,12 @@
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "build": "tsc",
-    "start": "tsx src/server.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/server.js",
     "dev": "tsx watch src/server.ts",
     "test": "vitest run",
     "db:push": "drizzle-kit push",
-    "db:seed": "tsx src/db/seed.ts",
-    "verify": "bash verify.sh"
+    "db:seed": "tsx src/db/seed.ts"
   },
   "keywords": [
     "llm",
