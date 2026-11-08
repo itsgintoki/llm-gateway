@@ -4,6 +4,21 @@ A high-reliability, minimal LLM Gateway built with **Node.js, TypeScript, Expres
 
 Engineered from first principles with **zero-trust concurrency protection (TOCTOU prevention)** via **Two-Phase Pessimistic Reservation**, integer micro-USD financial correctness, and automatic provider fallback.
 
+**Quick facts:** Node.js 20+ · TypeScript · Express 5 · PostgreSQL + Drizzle · Vitest (11 tests, mock providers) · OpenAI-compatible API
+**Case study:** [LLM Gateway — portfolio](https://itsgintoki.github.io/web/work/llm-gateway.html)
+
+## Contents
+
+- [Architecture](#architecture)
+- [Request lifecycle](#request-lifecycle)
+- [Fallback and circuit breaker](#fallback-and-circuit-breaker)
+- [Prerequisites & Tech Stack](#prerequisites--tech-stack)
+- [Quick Start](#quick-start)
+- [Testing](#testing)
+- [Quick Verification & Usage via curl](#quick-verification--usage-via-curl)
+- [Directory Structure](#directory-structure)
+- [Notes](#notes)
+
 ---
 
 ## Key Architectural Highlights
@@ -20,6 +35,76 @@ Engineered from first principles with **zero-trust concurrency protection (TOCTO
 * **Client Disconnect Propagation:** Immediately aborts upstream LLM calls and refunds reservations if the client closes the connection before completion.
 * **Deterministic Resilience Testing:** Supports `x-simulate-primary-failure: true` header to test provider fallback mechanics on demand.
 * **No Over-Engineering:** Pure Node.js + Express + PostgreSQL stack without Redis dependencies, frontends, or streaming overhead.
+
+---
+
+## Architecture
+
+```mermaid
+flowchart LR
+    Client["API client"] -->|"Bearer virtual key"| Gateway["Express gateway<br/>/v1/chat/completions"]
+    Gateway -->|"hash key + reserve"| PG[("PostgreSQL<br/>virtual_keys · usage_logs · in_flight_reservations")]
+    Gateway -->|"provider call outside tx"| Groq["Groq primary<br/>qwen/qwen3.8-27b"]
+    Gateway -->|"fallback"| Gemini["Gemini fallback<br/>gemini-3.1-flash-lite"]
+    Gateway -->|"settle or release"| PG
+    Gateway -->|"GET /v1/usage"| Usage["Usage telemetry"]
+    Usage --> PG
+```
+
+The gateway exposes an OpenAI-compatible `/v1/chat/completions` endpoint. The caller only ever sees a virtual key; provider credentials stay server-side. Every request reserves an estimated worst-case cost before a provider is called, then settles the provider-reported usage afterward.
+
+## Request lifecycle
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant G as Gateway
+    participant D as PostgreSQL
+    participant P as Provider
+
+    C->>G: POST /v1/chat/completions
+    G->>D: hash key + SELECT ... FOR UPDATE
+    G->>D: reserve worst-case µUSD + TTL reservation
+    D-->>G: commit (short transaction)
+    G->>P: provider call (outside the transaction)
+
+    alt provider success
+        P-->>G: completion + usage
+        G->>D: settle actual µUSD + usage log
+        G-->>C: 200 + x_gateway metadata
+    else transient failure
+        P-->>G: timeout / 429 / 5xx
+        G->>P: one retry, then Gemini fallback
+        P-->>G: completion
+        G->>D: settle fallback usage
+        G-->>C: 200 + fallback metadata
+    else non-transient client error
+        P-->>G: 400 / 422
+        G->>D: release reservation
+        G-->>C: error, no charge
+    end
+
+    Note over G,D: a TTL sweeper reclaims reservations<br/>left by an ungraceful crash
+```
+
+## Fallback and circuit breaker
+
+```mermaid
+flowchart TD
+    Req["Request reserved"] --> Primary["Groq primary"]
+    Primary -->|"2xx"| Settle["Settle actual usage"]
+    Primary -->|"400 / 422"| FailFast["Release reservation<br/>return client error"]
+    Primary -->|"429 / 5xx / timeout"| Retry["One retry + 250 ms backoff"]
+    Retry -->|"2xx"| Settle
+    Retry -->|"still failing"| Circuit{"Primary circuit open?"}
+    Circuit -->|"yes or no"| Gemini["Gemini fallback"]
+    Gemini -->|"2xx"| Settle
+    Gemini -->|"failure"| Release["Release reservation<br/>return upstream error"]
+    Settle --> Done["200 response"]
+```
+
+Transient primary failures get one retry with a short backoff. If Groq stays unavailable, the same reservation is routed to Gemini. Repeated primary failures open the circuit, so later requests skip the timeout penalty. Non-transient client errors fail fast and never trigger fallback.
 
 ---
 
@@ -73,14 +158,16 @@ The seed script creates 3 deterministic test virtual keys:
 2. `rok_test_tight_0001500_def456` ($0.0015 / 1,500 µUSD) — concurrency race testing (`Promise.all`).
 3. `rok_test_empty_0000000_ghi789` ($0.00 / 0 µUSD) — immediate 402 budget rejection testing.
 
-### 4. Run Automated Verification Tests
+### 4. Run the test suite
 ```bash
-# Run all integration and TOCTOU concurrency race tests
+# Unit + integration + TOCTOU concurrency tests
 pnpm test
 
-# Run strict TypeScript typechecking
+# Strict TypeScript typechecking
 pnpm typecheck
 ```
+
+See [Testing](#testing) for what is covered and why no API keys are needed.
 
 ### 5. Start the Server
 ```bash
@@ -91,6 +178,20 @@ pnpm dev
 pnpm build
 pnpm start
 ```
+
+`pnpm build` emits `dist/server.js` through `tsconfig.build.json`; `pnpm start` runs that file.
+
+---
+
+## Testing
+
+```sh
+pnpm test
+```
+
+Vitest runs against a real PostgreSQL database (`DATABASE_URL`) and forces `FALLBACK_MODE=mock` and `NODE_ENV=test` through `vitest.config.ts`, so the suite never calls Groq or Gemini and needs no API keys. The 11 tests cover missing/malformed/unknown keys, immediate budget exhaustion, the three-way TOCTOU race, fallback routing, usage accounting beyond the recent-log limit, model-aware reservation sizing, the orphaned-reservation sweeper, and the health/circuit state.
+
+The tests seed their own deterministic virtual keys. Run `pnpm db:push` once against the target database so the schema exists.
 
 ---
 
