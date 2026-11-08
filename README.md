@@ -36,6 +36,8 @@ Engineered from first principles with **zero-trust concurrency protection (TOCTO
 * **Deterministic Resilience Testing:** Supports `x-simulate-primary-failure: true` header to test provider fallback mechanics on demand.
 * **No Over-Engineering:** Pure Node.js + Express + PostgreSQL stack without Redis dependencies, frontends, or streaming overhead.
 
+Browser clients are limited to the origins in `CORS_ORIGINS`; leave it empty to block all cross-origin browser requests. Server-to-server callers are unaffected.
+
 ---
 
 ## Architecture
@@ -210,9 +212,12 @@ curl -s http://localhost:3001/health | jq .
 ```json
 {
   "status": "ok",
+  "circuit_breaker": "CLOSED",
   "timestamp": "2026-10-31T10:00:00.000Z"
 }
 ```
+
+`/health` runs `SELECT 1`, so it reports `503` with `status: "unhealthy"` when PostgreSQL is unreachable. `circuit_breaker` is the live primary-provider state (`CLOSED`, `OPEN`, or `HALF_OPEN`).
 
 ---
 
@@ -337,7 +342,7 @@ llm-gateway/
 │   │   └── pricing.ts        # Model pricing table & integer micro-USD estimation
 │   ├── db/
 │   │   ├── index.ts          # pg Pool + Drizzle ORM instance
-│   │   ├── schema.ts         # virtual_keys and usage_logs schema definitions
+│   │   ├── schema.ts         # virtual_keys, usage_logs, in_flight_reservations
 │   │   └── seed.ts           # Deterministic test keys seed script
 │   ├── services/
 │   │   ├── budget.service.ts # Two-phase pessimistic reservation, settlement, and rollback
