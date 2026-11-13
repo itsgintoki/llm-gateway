@@ -5,7 +5,7 @@ A high-reliability, minimal LLM Gateway built with **Node.js, TypeScript, Expres
 Engineered from first principles with **zero-trust concurrency protection (TOCTOU prevention)** via **Two-Phase Pessimistic Reservation**, integer micro-USD financial correctness, and automatic provider fallback.
 
 **Quick facts:** Node.js 20+ · TypeScript · Express 5 · PostgreSQL + Drizzle · Vitest (11 tests, mock providers) · OpenAI-compatible API
-**Case study:** [LLM Gateway — portfolio](https://itsgintoki.github.io/web/work/llm-gateway.html)
+**Case study:** [LLM Gateway — portfolio](https://anki.site/work/llm-gateway.html)
 
 ## Contents
 
